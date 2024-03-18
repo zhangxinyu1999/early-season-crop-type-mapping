@@ -1,0 +1,106 @@
+import glob
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow.keras.optimizers import Adam
+import keras.backend as K
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.layers import LSTM, Bidirectional,Dense,Flatten
+from tensorflow.keras.activations import softmax
+from tensorflow.keras.utils import to_categorical
+import rasterio as rio
+import random
+import h5py
+import matplotlib.pyplot as plt
+from sklearn import svm
+from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
+import pandas as pd
+from keras.layers import Conv1D
+
+
+# Construct the input layer with no definite frame size.
+def CNN(pretrained_weights = None, input_size = (359,1), class_num = 3, learning_rate = 1e-3):
+    input_ = keras.Input(shape=input_size, dtype="float32")
+    hidden = keras.layers.Conv1D(512, 3, activation='relu')(input_)
+    hidden2 = keras.layers.Conv1D(256, 3, activation='relu')(hidden)
+    hidden3 = keras.layers.Conv1D(128, 3, activation='relu')(hidden2)
+    hidden4 = keras.layers.Conv1D(64, 3, activation='relu')(hidden3)
+    hidden5 = keras.layers.Conv1D(32, 3, activation='relu')(hidden4)
+    attns = softmax(Dense(1)(hidden5),axis=1)
+    weighted_hidden =Flatten()(tf.matmul(tf.transpose(hidden5,[0,2,1]),attns))
+    out = Dense(class_num,activation='softmax')(weighted_hidden)
+    model = keras.Model(input_,out)
+
+    model.compile(optimizer = Adam(lr = learning_rate),
+                   loss = 'categorical_crossentropy',
+                  # metrics = [metric])
+                  metrics = ['accuracy'])
+    if(pretrained_weights):
+    	model.load_weights(pretrained_weights)
+    return model
+
+
+def plot_confusion_matrix(cm,label,title,ax):
+    disp_svm = ConfusionMatrixDisplay(confusion_matrix=cm)
+    im = disp_svm.plot(cmap='Blues',ax=ax,colorbar=False)
+    disp_svm.ax_.axes.tick_params(direction='in',length=0)
+    disp_svm.ax_.set_xticklabels(label,fontfamily='microsoft yahei')
+    disp_svm.ax_.set_yticklabels(label,rotation=90,fontfamily='microsoft yahei')
+    disp_svm.ax_.set_title(title,fontfamily='microsoft yahei')
+    return im
+
+
+if __name__ =='__main__':
+
+    model = CNN()
+    train_feature = np.load(r'G:\hlj_early_season\1201\longjiang\train.npy')
+    train_data = train_feature[:,1:]
+    n,c = train_data.shape
+    train_data = train_data.reshape(n,c,1)
+    train_type = train_feature[:,0]
+    train_data[np.isnan(train_data)] = 0
+
+    x=(train_data-train_data.mean(0))/train_data.std(0)
+    y = to_categorical(train_type-1)
+    val_feature = np.load(r'G:\hlj_early_season\1201\longjiang\val.npy')
+    val_data = val_feature[:,1:]
+    n,c = val_data.shape
+    val_data = (val_data.reshape(n,c,1)-train_data.mean(0))/train_data.std(0)
+    val_type = val_feature[:,0]
+    val_data[np.isnan(val_data)] = 0
+    val_type=val_type-1
+    val_dst = ((val_data[i],val_type(i)) for i in range(val_data.shape[0]))
+# %% train
+    model.fit(x,y,
+              batch_size=32,
+              epochs=200,
+              shuffle=True,
+              validation_steps=2,
+              validation_data = (val_data, to_categorical(val_type)),
+              workers=4,
+              )
+    model.save(r'G:\hlj_early_season\advice\lj_model_cnn.h5')
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.plot(model.history.history['accuracy'],'r-',label='train')
+    ax.plot(model.history.history['val_accuracy'],'b-',label='val')
+    ax.legend()
+
+    val_pred_rfc = model.predict(val_data)
+    cm_rfc = confusion_matrix(val_type, val_pred_rfc.argmax(1))
+    ua = cm_rfc[np.arange(cm_rfc.shape[0]),np.arange(cm_rfc.shape[0])]/cm_rfc.sum(0)
+    pa = cm_rfc[np.arange(cm_rfc.shape[0]),np.arange(cm_rfc.shape[0])]/cm_rfc.sum(1)
+    cm = np.zeros([cm_rfc.shape[0]+1,cm_rfc.shape[0]+1])
+    f_rfc = 2*pa*ua/(pa+ua)
+    print('acc={:.3f}'.format(np.uint16(val_pred_rfc==val_type).mean()))
+    print(f_rfc)
+    fig,axs = plt.subplots(1,1,figsize=(8,8))
+    plot_confusion_matrix(cm_rfc,['rice','Other crop type','rape'],title='CNN',ax=axs)
+
+    cm[:-1,:-1] = cm_rfc
+    cm[-1,:-1] = ua
+    cm[:-1,-1] = pa
+    cm[-1,-1] = np.uint16(val_pred_rfc.argmax(1)==val_type).mean()
+    cm = pd.DataFrame(cm)
+    print(cm)
