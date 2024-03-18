@@ -1,0 +1,374 @@
+// This code is doing to generate RVI time series after preprocessing and S-Gfilter
+//preprocessing include:(1)remove_high_incidenceangle;(2)20-day composition;(3)Refined Lee Filter
+//and S-G filter
+
+// 1.generate study area 
+var table3 = ee.FeatureCollection("users/wangwenjing19980120/longjiang");
+var roi=table3.geometry(); 
+Map.addLayer(roi)
+
+var img_num=31
+//2.
+//var srtm = ee.Image("USGS/SRTMGL1_003");
+var sentinle1col = ee.ImageCollection('COPERNICUS/S1_GRD')
+            .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+            .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+            .filter(ee.Filter.eq('instrumentMode', 'IW'))
+            .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'))
+            .filterBounds(roi)
+            .filterDate('2018-12-20','2019-12-31')
+            //.select(['angle','VH'])// 
+print(sentinle1col,'sentinle1col');
+Map.addLayer(sentinle1col)
+var image2=sentinle1col.reduce(ee.Reducer.count())
+var image_count=image2.select('VH_count')
+//Map.addLayer(image_count.clip(Jianghan),{min:30,max:60})
+function maskS1(image) {
+  var count=image_count;
+  var mask1=count.lt(59);//31
+  var mask2=count.gte(59).and(image.select("angle").lt(40))
+  var mask =mask1.add(mask2)
+  return image.updateMask(mask)//.unmask(0);//.divide(10000);
+}
+
+var sentinle1col_remove_high_incidenceangle=sentinle1col.map(maskS1)
+print(sentinle1col_remove_high_incidenceangle,'sentinle1col_remove_high_incidenceangle')
+
+var count_remove_high_incidenceangle=sentinle1col_remove_high_incidenceangle.reduce(ee.Reducer.count())
+var image_count_remove_high_incidenceangle=count_remove_high_incidenceangle.select('VH_count')
+Map.addLayer(image_count_remove_high_incidenceangle.clip(Jianghan),{min:30,max:60})
+
+var Date_Start = ee.Date('2018-12-20');//定义起始时间
+var Date_End = ee.Date('2019-12-31');//定义终止时间
+var Date_window = ee.Number(12);//定义时间窗口
+// 创建时间序列
+var n_months = Date_End.difference(Date_Start,'day').round();//计算时间段内的总day数
+print(n_months)
+var dates = ee.List.sequence(0,n_months,12);//创建原始的时间序列List
+print(dates)
+function make_datelist(n){
+  return Date_Start.advance(n,'day');	
+}
+dates = dates.map(make_datelist);//对原始的时间序列内的每一个元素执行上述的函数处理，获得逐月时间元素
+print(dates)
+
+function range(d1){
+  var d2=ee.Date(d1).advance(12,'day')
+  var dg=ee.DateRange(d1, d2)
+  return dg
+}
+var daterg = dates.map(range)//对时间List每一个元素执行该函数，获取逐月的时间范围
+print(daterg ,'daterg ')//打印看看
+
+
+var i = 0;//定义一个计数变量i
+var s1imgcol = ee.List([]);//创建一个空白的List
+//执行循环处理，对每一个月内的MOD的最大值合成的EVI进行合成并以polygon范围进行裁剪
+while (i<img_num){
+  var dt = daterg.get(i)//获取每一个时间范围
+  var img = sentinle1col_remove_high_incidenceangle.select(['VH','VV']).filterDate(dt).median()//执行合成波段选择和裁剪
+  Map.addLayer(img.select('VH').clip(Jianghan),{max:1,min:-50},'img'+i)
+  s1imgcol = s1imgcol.add(img)//.select('NDVI','LSWI','REP'*/))//将每一个结果添加至先前创建的List中
+  i++;//计数器+1,
+}
+print(s1imgcol,'s1imgcol');
+var s1imgcol2=ee.ImageCollection(s1imgcol);
+print(s1imgcol2,'s1imgcol2')
+
+
+function addmean(image){
+  var weights3 = ee.List.repeat(ee.List.repeat(1,21),21);
+  var kernel3 = ee.Kernel.fixed(21,21, weights3, 10, 10, false);
+  var image1=image//.unmask(0)
+  var mean3 = image1.reduceNeighborhood(ee.Reducer.mean(), kernel3,'kernel',false);
+  var add=image.unmask(mean3)
+  return add
+}
+
+
+var s1imgcol3=s1imgcol2.select('VH').map(addmean)
+var s1imgcol31=s1imgcol2.select('VV').map(addmean)
+print(s1imgcol3,'s1imgcol3');
+
+function toNatural(img) {
+return ee.Image(10.0).pow(img.select(0).divide(10.0));
+}
+
+function toDB(img) {
+return ee.Image(img).log10().multiply(10.0);
+}
+
+
+function RefinedLee(img) {
+  // img must be in natural units, i.e. not in dB!
+  // Set up 3x3 kernels
+  var myimg2= img;
+  // convert to natural.. do not apply function on dB!
+  var myimg = toNatural(myimg2);
+   
+  var weights3 = ee.List.repeat(ee.List.repeat(1,3),3);
+  var kernel3 = ee.Kernel.fixed(3,3, weights3, 1, 1, false);
+   
+  var mean3 = myimg.reduceNeighborhood(ee.Reducer.mean(), kernel3);
+  var variance3 = myimg.reduceNeighborhood(ee.Reducer.variance(), kernel3);
+   
+  // Use a sample of the 3x3 windows inside a 7x7 windows to determine gradients and directions
+  var sample_weights = ee.List([[0,0,0,0,0,0,0], [0,1,0,1,0,1,0],[0,0,0,0,0,0,0], [0,1,0,1,0,1,0], [0,0,0,0,0,0,0], [0,1,0,1,0,1,0],[0,0,0,0,0,0,0]]);
+   
+  var sample_kernel = ee.Kernel.fixed(7,7, sample_weights, 3,3, false);
+   
+  // Calculate mean and variance for the sampled windows and store as 9 bands
+  var sample_mean = mean3.neighborhoodToBands(sample_kernel);
+  var sample_var = variance3.neighborhoodToBands(sample_kernel);
+   
+  // Determine the 4 gradients for the sampled windows
+  var gradients = sample_mean.select(1).subtract(sample_mean.select(7)).abs();
+  gradients = gradients.addBands(sample_mean.select(6).subtract(sample_mean.select(2)).abs());
+  gradients = gradients.addBands(sample_mean.select(3).subtract(sample_mean.select(5)).abs());
+  gradients = gradients.addBands(sample_mean.select(0).subtract(sample_mean.select(8)).abs());
+   
+  // And find the maximum gradient amongst gradient bands
+  var max_gradient = gradients.reduce(ee.Reducer.max());
+   
+  // Create a mask for band pixels that are the maximum gradient
+  var gradmask = gradients.eq(max_gradient);
+   
+  // duplicate gradmask bands: each gradient represents 2 directions
+  gradmask = gradmask.addBands(gradmask);
+   
+  // Determine the 8 directions
+  var directions = sample_mean.select(1).subtract(sample_mean.select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(7))).multiply(1);
+  directions = directions.addBands(sample_mean.select(6).subtract(sample_mean.select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(2))).multiply(2));
+  directions = directions.addBands(sample_mean.select(3).subtract(sample_mean.select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(5))).multiply(3));
+  directions = directions.addBands(sample_mean.select(0).subtract(sample_mean.select(4)).gt(sample_mean.select(4).subtract(sample_mean.select(8))).multiply(4));
+  // The next 4 are the not() of the previous 4
+  directions = directions.addBands(directions.select(0).not().multiply(5));
+  directions = directions.addBands(directions.select(1).not().multiply(6));
+  directions = directions.addBands(directions.select(2).not().multiply(7));
+  directions = directions.addBands(directions.select(3).not().multiply(8));
+   
+  // Mask all values that are not 1-8
+  directions = directions.updateMask(gradmask);
+   
+  // "collapse" the stack into a singe band image (due to masking, each pixel has just one value (1-8) in it's directional band, and is otherwise masked)
+  directions = directions.reduce(ee.Reducer.sum());
+   
+  var sample_stats = sample_var.divide(sample_mean.multiply(sample_mean));
+   
+  // Calculate localNoiseVariance
+  var sigmaV = sample_stats.toArray().arraySort().arraySlice(0,0,5).arrayReduce(ee.Reducer.mean(), [0]);
+   
+  // Set up the 7*7 kernels for directional statistics
+  var rect_weights = ee.List.repeat(ee.List.repeat(0,7),3).cat(ee.List.repeat(ee.List.repeat(1,7),4));
+   
+  var diag_weights = ee.List([[1,0,0,0,0,0,0], [1,1,0,0,0,0,0], [1,1,1,0,0,0,0],
+  [1,1,1,1,0,0,0], [1,1,1,1,1,0,0], [1,1,1,1,1,1,0], [1,1,1,1,1,1,1]]);
+   
+  var rect_kernel = ee.Kernel.fixed(7,7, rect_weights, 3, 3, false);
+  var diag_kernel = ee.Kernel.fixed(7,7, diag_weights, 3, 3, false);
+   
+  // Create stacks for mean and variance using the original kernels. Mask with relevant direction.
+  var dir_mean = myimg.reduceNeighborhood(ee.Reducer.mean(), rect_kernel).updateMask(directions.eq(1));
+  var dir_var = myimg.reduceNeighborhood(ee.Reducer.variance(), rect_kernel).updateMask(directions.eq(1));
+   
+  dir_mean = dir_mean.addBands(myimg.reduceNeighborhood(ee.Reducer.mean(), diag_kernel).updateMask(directions.eq(2)));
+  dir_var = dir_var.addBands(myimg.reduceNeighborhood(ee.Reducer.variance(), diag_kernel).updateMask(directions.eq(2)));
+   
+  // and add the bands for rotated kernels
+  for (var i=1; i<4; i++) {
+  dir_mean = dir_mean.addBands(myimg.reduceNeighborhood(ee.Reducer.mean(), rect_kernel.rotate(i)).updateMask(directions.eq(2*i+1)));
+  dir_var = dir_var.addBands(myimg.reduceNeighborhood(ee.Reducer.variance(), rect_kernel.rotate(i)).updateMask(directions.eq(2*i+1)));
+  dir_mean = dir_mean.addBands(myimg.reduceNeighborhood(ee.Reducer.mean(), diag_kernel.rotate(i)).updateMask(directions.eq(2*i+2)));
+  dir_var = dir_var.addBands(myimg.reduceNeighborhood(ee.Reducer.variance(), diag_kernel.rotate(i)).updateMask(directions.eq(2*i+2)));
+  }
+   
+  // "collapse" the stack into a single band image (due to masking, each pixel has just one value in it's directional band, and is otherwise masked)
+  dir_mean = dir_mean.reduce(ee.Reducer.sum());
+  dir_var = dir_var.reduce(ee.Reducer.sum());
+   
+  // A finally generate the filtered value
+  var varX = dir_var.subtract(dir_mean.multiply(dir_mean).multiply(sigmaV)).divide(sigmaV.add(1.0));
+   
+  var b = varX.divide(dir_var);
+   
+  var result = dir_mean.add(b.multiply(myimg.subtract(dir_mean)));
+  //return(result);
+  return(img.select([]).addBands(ee.Image(result.arrayGet(0))));
+  //return(img.select([]).addBands(ee.Image(toDB(result.arrayGet(0)))));//NOT TO DB HERE,BUT AFTER CALCULATING RVI
+}
+
+var sentinel1_refinedlee_VH=s1imgcol3.select('VH').map(RefinedLee);
+var sentinel1_refinedlee_VV=s1imgcol31.select('VV').map(RefinedLee);
+
+print(sentinel1_refinedlee_VV,'sentinel1_refinedlee_VV');
+print(sentinel1_refinedlee_VH,'sentinel1_refinedlee_VH');
+var vv=sentinel1_refinedlee_VV.toList(img_num);
+var vh=sentinel1_refinedlee_VH.toList(img_num);
+print(vh,'vh')
+var ratiolist=ee.List([]);
+for(var i=0; i<img_num;i++){
+  var image_VHtemp=vh.get(i);
+  var image_VVtemp=vv.get(i);
+  var ratio=toDB(ee.Image(image_VHtemp).divide(ee.Image(image_VVtemp)));
+  var ratiolist = ratiolist.add(ratio);
+}
+print(ratiolist,'ratiolist')
+// generate timeseries
+
+var listsum1=ee.List([]);
+for (var i=0;i<img_num;i=i+1)
+{  
+  var listsum1=listsum1.add(ee.Image(ratiolist.get(i)).set('ss',i));
+// Map.addLayer(ee.Image(ratiolist.get(i)),{},'img'+i)
+}
+print('listsum1',listsum1);
+
+
+
+var listsum1_VH=ee.List([]);
+for (var i=0;i<img_num;i=i+1)
+{  
+  var listsum1_VH=listsum1_VH.add(toDB(ee.Image(vh.get(i))).set('ss',i));
+
+}
+print('listsum1_VH',listsum1_VH);
+
+//S-G filter
+
+
+var listsum1_clip=ee.List([])
+var listsum1_VH_clip=ee.List([])
+
+for(var i=0;i<img_num;i++){
+  var temp_clip_vh=ee.Image(listsum1_VH.get(i)).unmask(0)
+  var temp_clip_rvi=ee.Image(listsum1.get(i)).unmask(0)
+  var listsum1_clip=listsum1_clip.add(temp_clip_rvi)
+  var listsum1_VH_clip=listsum1_VH_clip.add(temp_clip_vh)
+}
+var listsum1_clip=listsum1_clip.add(ee.Image(listsum1.get(0)).unmask(0).set('ss',img_num))
+var listsum1_VH_clip=listsum1_VH_clip.add(ee.Image(listsum1_VH.get(0)).unmask(0).set('ss',img_num))
+print(listsum1_clip,'listsum1_clip')
+var final_rvi_seg=ee.List([])
+var final_vh_seg=ee.List([])
+
+
+
+for(var i=0;i<img_num;i++){
+  //var i=0;
+  var temp2=listsum1_clip.get(i);
+  var temp3=listsum1_VH_clip.get(i);
+  var RVI_afterseg = ee.Image(temp2).unmask(0).set('ss',i);
+  var VH_afterseg = ee.Image(temp3).unmask(0).set('ss',i);
+  //print(RVI_aftersg_seg,'RVI_aftersg_seg')
+  //print(VH_aftersg_seg,'VH_aftersg_seg')
+  var final_rvi_seg=final_rvi_seg.add(RVI_afterseg);
+  var final_vh_seg=final_vh_seg.add(VH_afterseg);
+
+}
+
+
+
+print(final_vh_seg,'final_vh_seg')
+
+function SG_filter(listsum){
+  
+var modis_res = ee.ImageCollection(listsum).map(function(img) {
+  var dstamp = ee.Number(img.get('ss'))
+  var ddiff = dstamp
+  img = img.select(['sum']).set('date', dstamp)
+  return img.addBands(ee.Image(1).toFloat().rename('constant')).
+    addBands(ee.Image(ddiff).toFloat().rename('t')).
+    addBands(ee.Image(ddiff).pow(ee.Image(2)).toFloat().rename('t2')).
+    addBands(ee.Image(ddiff).pow(ee.Image(3)).toFloat().rename('t3'))
+})
+////print(modis_res,'modis_res')
+
+// Step 2: Set up Savitzky-Golay smoothing
+var window_size = 5
+var half_window = (window_size - 1)/2
+
+// Define the axes of variation in the collection array.
+var imageAxis = 0;
+var bandAxis = 1;
+
+// // Set polynomial order
+// var order = 3
+// var coeffFlattener = [['constant', 'x', 'x2', 'x3']]
+// var indepSelectors = ['constant', 't', 't2', 't3']
+
+//Change to order = 2 as follows:
+var order = 2
+var coeffFlattener = [['constant', 'x', 'x2']]
+var indepSelectors = ['constant', 't', 't2']
+
+// Convert the collection to an array.
+var array = modis_res.toArray()//.updateMask(countmask1.eq(18));
+//print(array,'array')
+// Solve 
+function getLocalFit(i) {
+  // Get a slice corresponding to the window_size of the SG smoother
+  var subarray = array.arraySlice(imageAxis, ee.Number(i).int(), ee.Number(i).add(window_size).int())
+  var predictors = subarray.arraySlice(bandAxis, 1,1 + order + 1)
+  var response = subarray.arraySlice(bandAxis, 0, 1); // NDVI
+  var coeff = predictors.matrixSolve(response)
+
+  coeff = coeff.arrayProject([0]).arrayFlatten(coeffFlattener)
+  return coeff  
+}
+
+// For the remainder, use modis_res as a list of images
+modis_res = modis_res.toList(modis_res.size())
+var runLength = ee.List.sequence(0, modis_res.size().subtract(window_size))
+////print(runLength,'runLength')
+// Run the SG solver over the series, and return the smoothed image version
+var sg_series = runLength.map(function(i) {
+  var ref = ee.Image(modis_res.get(ee.Number(i).add(half_window)))
+  return getLocalFit(i).multiply(ref.select(indepSelectors)).reduce(ee.Reducer.sum()).copyProperties(ref)
+})
+
+return sg_series
+}
+
+var RVI_seg_sg=SG_filter(final_rvi_seg)
+var VH_seg_sg=SG_filter(final_vh_seg)
+
+print(RVI_seg_sg,'RVI_seg_sg')
+print(VH_seg_sg,'VH_seg_sg')
+
+var final_rvi_aftersg_seg=ee.List([])
+var final_vh_aftersg_seg=ee.List([])
+
+img_num=img_num-4
+
+for(var i=0;i<img_num;i++){
+var temp4=RVI_seg_sg.get(i);
+var temp5=VH_seg_sg.get(i);
+  var final_rvi_aftersg_seg=final_rvi_aftersg_seg.add(temp4);
+  var final_vh_aftersg_seg=final_vh_aftersg_seg.add(temp5);
+  
+}
+print(final_rvi_aftersg_seg,'final_rvi_aftersg_seg')
+print(final_vh_aftersg_seg,'final_vh_aftersg_seg')
+
+var fin_img=ee.ImageCollection(final_vh_aftersg_seg);
+function exportImageCollection(imgCol) { 
+  var indexList = imgCol.reduceColumns(ee.Reducer.toList(), ["data"]) 
+                        .get("list"); 
+  indexList.evaluate(function(indexs) { 
+    for (var i=0; i<indexs.length; i++) { 
+      var image = imgCol.filter(ee.Filter.eq("data", indexs[i])).first(); 
+      image = image.toFloat(); 
+      Export.image.toDrive({ 
+        image: image.clip(roi), 
+        description: indexs[i], 
+        fileNamePrefix: indexs[i], 
+          folder: "vh",
+        region: roi, 
+        scale: 10,  
+        crs: "EPSG:4326", 
+        maxPixels: 1e13 
+      }); 
+    } 
+  }); 
+} 
+exportImageCollection(fin_img); 
