@@ -1,0 +1,96 @@
+import numpy as np
+import geopandas as gpd
+import rasterio as rio
+from rasterio import transform
+from rasterio import sample
+from tqdm import trange
+import multiprocessing
+from sklearn import svm
+from sklearn.ensemble import RandomForestClassifier as RFC
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def use_style(ax):
+    ax.set_facecolor([235/255,235/255,235/255])
+    ax.grid(color='w',linewidth=1,zorder=0)
+    ax.spines['bottom'].set_color('white')
+    ax.spines['top'].set_color('white')
+    ax.spines['left'].set_color('white')
+    ax.spines['right'].set_color('white')
+    ax.axes.tick_params(direction='out',length=1,labelsize=12)
+
+def plot_confusion_matrix(cm,label,title,ax):
+    # cm = np.uint16(cm)
+    disp_svm = ConfusionMatrixDisplay(confusion_matrix=cm)
+    im = disp_svm.plot(cmap='Blues',ax=ax,colorbar=False)
+    disp_svm.ax_.axes.tick_params(direction='in',length=0)
+    disp_svm.ax_.set_xticklabels(label,fontfamily='microsoft yahei')
+    disp_svm.ax_.set_yticklabels(label,rotation=90,fontfamily='microsoft yahei')
+    disp_svm.ax_.set_xlabel('pre',fontfamily='microsoft yahei',fontsize=14)
+    disp_svm.ax_.set_ylabel('real',fontfamily='microsoft yahei',fontsize=14)
+    disp_svm.ax_.set_title(title,fontfamily='microsoft yahei')
+    return im
+all_fi=np.zeros([100,7])
+all_temp_num=['s1s2l8','g1g6','g1g6s2l8','s1g1g6','s1g1g6s2l8','s1s2','s2l8']
+main_path=r'G:\hlj_early_season\1201\longjiang\xtong'
+all_crop_type=[1,2]
+all_crop_name=['corn','rice']
+for crop_temp_num in range(0,2):
+    crop_num=all_crop_type[crop_temp_num]
+    for idx_temp_num in range(0,7):
+        temp_num=all_temp_num[idx_temp_num]
+        train_path = r'%s\%s_train.npy'%(main_path,temp_num)
+        train_feature = np.load(train_path)
+        count_path = r'%s\%s_count.xlsx'%(main_path,temp_num)
+        count_feature =  pd.read_excel(count_path)
+        count_feature=count_feature.values
+        num_img=max(max(count_feature))
+        val_path = r'%s\%s_val.npy'%(main_path,temp_num)
+        val_feature = np.load(val_path)
+        for idx in range(1,num_img+1):
+            out_path = r'%s\rf\lj_rf_%s_%s_%d.xlsx'%(main_path,all_crop_name[crop_temp_num],temp_num,idx)
+            out_path1 = r'%s\rf\f1_rf_lj_%s.xlsx'%(main_path,all_crop_name[crop_temp_num])
+
+            count_img=np.argwhere(count_feature <= idx)
+            beg_img=min(count_img[:,1])+1
+            end_img=max(count_img[:,1])+2
+
+            train_data = train_feature[:,beg_img:end_img]
+            train_data[np.isnan(train_data)] = 0
+            train_type = train_feature[:,0]
+            train_type[train_type==4] = 0
+            train_type = np.uint8(train_type==crop_num)
+
+
+            val_data = val_feature[:,beg_img:end_img]
+            val_data[np.isnan(val_data)] = 0
+            val_type = val_feature[:,0]
+            val_type[val_type==4] = 0
+            val_type = np.uint8(val_type==crop_num)
+
+            rfc = RFC(n_estimators=500)
+            rfc.fit(train_data,train_type)
+            val_pred_rfc = rfc.predict(val_data)
+            cm_rfc = confusion_matrix(val_type, val_pred_rfc)
+
+            ua = cm_rfc[np.arange(cm_rfc.shape[0]),np.arange(cm_rfc.shape[0])]/cm_rfc.sum(0)
+            pa = cm_rfc[np.arange(cm_rfc.shape[0]),np.arange(cm_rfc.shape[0])]/cm_rfc.sum(1)
+            cm = np.zeros([cm_rfc.shape[0]+1,cm_rfc.shape[0]+1])
+            cm[:-1,:-1] = cm_rfc
+            cm[-1,:-1] = ua
+            cm[:-1,-1] = pa
+            cm[-1,-1] = np.uint16(val_pred_rfc==val_type).mean()
+            cm = pd.DataFrame(cm)
+
+            f_rfc = 2*pa*ua/(pa+ua)
+            f_score.append(f_rfc[-1])
+            print('acc={:.3f}'.format(np.uint16(val_pred_rfc==val_type).mean()))
+            print(f_rfc)
+
+            all_fi[idx-1,idx_temp_num]=f_rfc[1]
+            cm.to_excel(out_path)
+    all_fi1 = pd.DataFrame(all_fi)
+    all_fi1.to_excel(out_path1)
+    print(all_fi)
